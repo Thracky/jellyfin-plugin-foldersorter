@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Folder Sorter</title>
+</head>
+<body>
+<div data-role="page" class="page type-interior pluginConfigurationPage foldersorterPage" data-require="emby-input,emby-button,emby-select">
+    <div data-role="content">
+        <div class="content-primary">
+            <h2>Folder Sorter destinations</h2>
+            <p>Each destination is an existing folder inside one of your libraries. "Move to &lt;name&gt;" moves a song's or album's whole folder into it, keeping the folder name unchanged.</p>
+            <form class="foldersorterForm">
+                <div class="foldersorterRows"></div>
+                <div class="foldersorterError" style="color:#cc3333;margin:1em 0;"></div>
+                <button is="emby-button" type="button" class="raised btnAddDestination">
+                    <span>Add destination</span>
+                </button>
+                <button is="emby-button" type="submit" class="raised button-submit block">
+                    <span>Save</span>
+                </button>
+            </form>
+        </div>
+    </div>
+    <script type="text/javascript">
+        (function () {
+            var pluginId = 'b8e5d3a1-6c4f-4b27-9a0e-3f1d7c52e8a4';
+            var page = document.querySelector('.foldersorterPage');
+            var rows = page.querySelector('.foldersorterRows');
+            var errorEl = page.querySelector('.foldersorterError');
+            var libraries = [];
+
+            function esc(s) {
+                var d = document.createElement('div');
+                d.textContent = s == null ? '' : String(s);
+                return d.innerHTML.replace(/"/g, '&quot;');
+            }
+
+            function addRow(dest) {
+                var row = document.createElement('div');
+                row.className = 'foldersorterRow';
+                row.setAttribute('data-id', dest.Id || crypto.randomUUID());
+                row.style.cssText = 'display:flex;gap:1em;align-items:flex-end;flex-wrap:wrap;margin-bottom:1em;';
+                var options = libraries.map(function (l) {
+                    return '<option value="' + esc(l.ItemId) + '"' + (l.ItemId === dest.LibraryId ? ' selected' : '') + '>' + esc(l.Name) + '</option>';
+                }).join('');
+                row.innerHTML =
+                    '<div class="inputContainer" style="flex:1;min-width:10em;margin:0;"><input is="emby-input" type="text" class="txtName" label="Name" value="' + esc(dest.Name) + '" /></div>' +
+                    '<div class="selectContainer" style="flex:1;min-width:10em;margin:0;"><select is="emby-select" class="selLibrary" label="Library">' + options + '</select></div>' +
+                    '<div class="inputContainer" style="flex:2;min-width:16em;margin:0;"><input is="emby-input" type="text" class="txtPath" label="Folder path on server" value="' + esc(dest.Path) + '" /></div>' +
+                    '<button is="emby-button" type="button" class="raised btnRemove"><span>Remove</span></button>';
+                row.querySelector('.btnRemove').addEventListener('click', function () { row.remove(); });
+                rows.appendChild(row);
+            }
+
+            page.addEventListener('pageshow', function () {
+                Dashboard.showLoadingMsg();
+                errorEl.textContent = '';
+                Promise.all([ApiClient.getVirtualFolders(), ApiClient.getPluginConfiguration(pluginId)]).then(function (r) {
+                    libraries = r[0] || [];
+                    rows.innerHTML = '';
+                    ((r[1] && r[1].Destinations) || []).forEach(addRow);
+                    Dashboard.hideLoadingMsg();
+                }, function () {
+                    Dashboard.hideLoadingMsg();
+                    errorEl.textContent = 'Could not load configuration.';
+                });
+            });
+
+            page.querySelector('.btnAddDestination').addEventListener('click', function () {
+                addRow({ Id: crypto.randomUUID(), Name: '', LibraryId: libraries.length ? libraries[0].ItemId : '', Path: '' });
+            });
+
+            page.querySelector('.foldersorterForm').addEventListener('submit', function (e) {
+                e.preventDefault();
+                var list = [];
+                var rowEls = rows.querySelectorAll('.foldersorterRow');
+                for (var i = 0; i < rowEls.length; i++) {
+                    var el = rowEls[i];
+                    var d = {
+                        Id: el.getAttribute('data-id'),
+                        Name: el.querySelector('.txtName').value.trim(),
+                        LibraryId: el.querySelector('.selLibrary').value,
+                        Path: el.querySelector('.txtPath').value.trim()
+                    };
+                    if (!d.Name || !d.Path || !d.LibraryId) {
+                        errorEl.textContent = 'Row ' + (i + 1) + ': name, library and path are required.';
+                        return false;
+                    }
+                    list.push(d);
+                }
+                errorEl.textContent = '';
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(pluginId).then(function (cfg) {
+                    cfg.Destinations = list;
+                    return ApiClient.updatePluginConfiguration(pluginId, cfg);
+                }).then(function (result) {
+                    Dashboard.processPluginConfigurationUpdateResult(result);
+                });
+                return false;
+            });
+        })();
+    </script>
+</div>
+</body>
+</html>
