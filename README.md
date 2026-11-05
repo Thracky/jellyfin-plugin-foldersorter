@@ -20,7 +20,8 @@ Target: **Jellyfin 12.2** (server and the bundled web client). No fork of jellyf
   - album details page;
   - song rows and album/song cards (the ⋮ button, or right-click);
   - the now-playing bar and Now Playing page.
-- **Delete folder**, with a confirmation that shows the folder name.
+- **Delete folder**, with a confirmation that lists the folder names. You can turn the confirmation off for
+  the current browser tab.
 - **Moves whole releases.** A song moves the album folder Jellyfin assigned it to, so multi-disc releases
   (`Album/Disc 1`, `Album/Disc 2`) move as one. Songs that aren't in an album folder move their own
   directory.
@@ -205,6 +206,15 @@ The folder becomes `<destination path>/<folder name>`. The move is refused if:
 Removes the album through Jellyfin, as **Delete media** does, and then removes whatever is left in the
 folder (covers, `.nfo` files, scans). This is only available for folders Jellyfin sees as an album.
 
+The confirmation dialog lists the folders that will be deleted. Its controls:
+
+- **Delete** has the focus, so Enter confirms; Escape or **Cancel** aborts.
+- **Don't ask again in this browser tab** skips the dialog for the rest of that tab's session. The setting
+  is kept in `sessionStorage`, so closing the tab turns the confirmation back on. Reloading the page does
+  not.
+- While the confirmation is off, the menus show an extra **Ask before deleting folders** entry that turns it
+  back on straight away.
+
 ### Permissions
 
 Both actions require the user to be allowed to delete the item: the global **Allow media deletion**
@@ -298,19 +308,23 @@ without depending on this plugin. [Folder Browser](../jellyfin-plugin-folderbrow
 
 ```js
 if (window.FolderSorter && typeof window.FolderSorter.showMenu === 'function') {
-    // Opens a popup with "Move to …" and "Delete folder" next to anchorElement.
-    const result = await window.FolderSorter.showMenu(anchorElement, itemId);
-    // 'done' after a successful move or delete; null when dismissed, cancelled or failed
-    // (failures are already shown to the user).
+    // Opens a popup with "Move to …" and "Delete folder" next to anchorElement, for one item or several.
+    const result = await window.FolderSorter.showMenu(anchorElement, itemIdOrIds);
+    // { succeeded: [ids], failed: [ids] } once a move or delete ran;
+    // null when the popup was dismissed or the delete was cancelled.
 }
 ```
 
-- `window.FolderSorter.version` is `1`.
+- `window.FolderSorter.version` is `2`. Version 1 accepted a single ID and resolved `'done'`.
 - Once the API is available, the script dispatches a `foldersorter:ready` event on `document`. Listen for it
   if your script may run first.
-- The popup applies the same rules as the item menu:
-  - only songs and albums the user may delete;
-  - the same confirmation, playback handling and error alerts.
+- The popup applies the same rules as the item menu: only songs and albums the user may delete, the same
+  confirmation, and the same playback handling.
+- **Several items:**
+  - they are processed one after another;
+  - playback is adjusted once at the end;
+  - a single toast reports success, or a single alert lists each folder that failed and why. The other
+    folders are still processed.
 
 ## Project structure
 

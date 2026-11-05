@@ -124,6 +124,9 @@
                 scroller.appendChild(makeButton('folder_delete', 'Delete folder', function () {
                     runDelete(sheet, item);
                 }));
+                if (confirmationSkipped()) {
+                    scroller.appendChild(confirmationEntry(function () { closeSheet(sheet); }));
+                }
             });
         }).catch(function (err) {
             console.warn('Folder Sorter: could not add menu entries', err);
@@ -238,22 +241,31 @@
     setInterval(patchApiClient, 1000);
     patchApiClient();
 
-    // Works out what has to happen to this device's playback once the folder's items disappear.
+    // Works out what has to happen to this device's playback after some folders were moved or deleted.
     // Returns { kind: 'none' } | { kind: 'stop', sessionId } | { kind: 'play', sessionId, ids }.
-    // Moved items get new ids, so queued tracks of the folder can no longer be played; the remaining
-    // queue is replaced by the entries after the current track that are not part of the folder.
-    function computePlan(item) {
+    // It runs after the operation: the removed tracks' ids no longer resolve, and the remaining queue
+    // (entries after the current track that are still in the library and not in those folders) is replayed.
+    function computePlan(items) {
+        var removedIds = {};
+        var removedAlbums = {};
+        items.forEach(function (item) {
+            removedIds[item.Id] = true;
+            var albumId = item.Type === 'MusicAlbum' ? item.Id : item.AlbumId;
+            if (albumId) {
+                removedAlbums[albumId] = true;
+            }
+        });
+        var affected = function (id, albumId) {
+            return removedIds[id] === true || (!!albumId && removedAlbums[albumId] === true);
+        };
+
         return api().getSessions({ DeviceId: api().deviceId() }).then(function (sessions) {
             var session = sessions && sessions[0];
             if (!session || !session.NowPlayingItem) {
                 return { kind: 'none' };
             }
 
-            var albumId = item.Type === 'MusicAlbum' ? item.Id : item.AlbumId;
             var now = session.NowPlayingItem;
-            var affected = function (id, itemAlbumId) {
-                return id === item.Id || (albumId && itemAlbumId === albumId);
-            };
             if (!affected(now.Id, now.AlbumId)) {
                 return { kind: 'none' };
             }
@@ -295,61 +307,212 @@
         return Promise.resolve();
     }
 
-    // Resolves true when the request succeeded, false when it failed (the error is shown to the user).
-    function perform(item, request, successMessage) {
-        return computePlan(item).catch(function () {
-            return { kind: 'none' };
-        }).then(function (plan) {
-            return request().then(function () {
-                return applyPlan(plan).catch(function (e) {
-                    console.warn('Folder Sorter: could not adjust playback', e);
+    function folderLabel(item) {
+        if (item.Path) {
+            var parts = String(item.Path).split(/[\\/]/).filter(Boolean);
+            var name = parts[parts.length - 1] || item.Name;
+            // A song acts on its folder.
+            return item.Type === 'Audio' && parts.length > 1 ? parts[parts.length - 2] : name;
+        }
+        return item.Name;
+    }
+
+    // Runs one request per item, one after another, then adjusts playback once and reports the outcome:
+    // a toast when everything worked, one alert listing what failed otherwise.
+    // Resolves { succeeded: [ids], failed: [ids] }.
+    function runBatch(items, request, verb) {
+        var succeeded = [];
+        var failed = [];
+        var chain = Promise.resolve();
+        items.forEach(function (item) {
+            chain = chain.then(function () {
+                return request(item).then(function () {
+                    succeeded.push(item);
+                }, function (err) {
+                    return errorText(err).then(function (text) {
+                        failed.push({ item: item, message: text });
+                    });
                 });
-            }).then(function () {
-                toast(successMessage);
-                return true;
             });
-        }).catch(function (err) {
-            return reportError(err).then(function () { return false; });
+        });
+
+        return chain.then(function () {
+            if (!succeeded.length) {
+                return null;
+            }
+            return computePlan(succeeded).then(applyPlan).catch(function (e) {
+                console.warn('Folder Sorter: could not adjust playback', e);
+            });
+        }).then(function () {
+            if (!failed.length) {
+                toast(items.length === 1 ? verb.one : verb.many.replace('{n}', items.length));
+            } else if (items.length === 1) {
+                window.alert(failed[0].message);
+            } else {
+                window.alert(verb.summary.replace('{done}', succeeded.length).replace('{n}', items.length) + '\n\n' +
+                    failed.map(function (f) { return '• ' + folderLabel(f.item) + ': ' + f.message; }).join('\n'));
+            }
+            return {
+                succeeded: succeeded.map(function (i) { return i.Id; }),
+                failed: failed.map(function (f) { return f.item.Id; })
+            };
         });
     }
 
-    function moveItem(item, destination) {
-        return perform(item, function () {
+    function moveItems(items, destination) {
+        return runBatch(items, function (item) {
             return api().ajax({
                 type: 'POST',
                 url: api().getUrl('FolderSorter/Items/' + item.Id + '/Move', { destinationId: destination.Id })
             });
-        }, 'Moved to ' + destination.Name);
+        }, {
+            one: 'Moved to ' + destination.Name,
+            many: 'Moved {n} folders to ' + destination.Name,
+            summary: 'Moved {done} of {n} folders to ' + destination.Name + '. Not moved:'
+        });
     }
 
-    // Resolves true when the folder was deleted, false when cancelled or failed.
-    function deleteItem(item) {
-        return api().getJSON(api().getUrl('FolderSorter/Items/' + item.Id + '/Folder')).then(function (info) {
-            if (!window.confirm('Delete folder "' + info.FolderName + '" and everything in it?')) {
-                return false;
+    function deleteItems(items) {
+        return confirmDelete(items).then(function (confirmed) {
+            if (!confirmed) {
+                return null;
             }
-            return perform(item, function () {
+            return runBatch(items, function (item) {
                 return api().ajax({ type: 'DELETE', url: api().getUrl('FolderSorter/Items/' + item.Id + '/Folder') });
-            }, 'Folder deleted');
-        }, function (err) {
-            return reportError(err).then(function () { return false; });
+            }, {
+                one: 'Folder deleted',
+                many: 'Deleted {n} folders',
+                summary: 'Deleted {done} of {n} folders. Not deleted:'
+            });
+        });
+    }
+
+    // ---------- delete confirmation ----------
+
+    // "Don't ask again" lasts for this browser tab (sessionStorage): closing the tab turns confirmation back
+    // on, and the menus offer "Ask before deleting" while it is off.
+    var SKIP_CONFIRM_KEY = 'foldersorter.skipDeleteConfirm';
+
+    function confirmationSkipped() {
+        try {
+            return window.sessionStorage.getItem(SKIP_CONFIRM_KEY) === '1';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function setConfirmationSkipped(skip) {
+        try {
+            if (skip) {
+                window.sessionStorage.setItem(SKIP_CONFIRM_KEY, '1');
+            } else {
+                window.sessionStorage.removeItem(SKIP_CONFIRM_KEY);
+            }
+        } catch (e) {
+            console.warn('Folder Sorter: sessionStorage unavailable', e);
+        }
+    }
+
+    function folderNames(items) {
+        return Promise.all(items.map(function (item) {
+            return api().getJSON(api().getUrl('FolderSorter/Items/' + item.Id + '/Folder')).then(function (info) {
+                return info.FolderName;
+            }, function () {
+                return folderLabel(item);
+            });
+        }));
+    }
+
+    function confirmDelete(items) {
+        if (confirmationSkipped()) {
+            return Promise.resolve(true);
+        }
+        return folderNames(items).then(function (names) {
+            return new Promise(function (resolve) {
+                var overlay = document.createElement('div');
+                overlay.className = 'foldersorter-confirm';
+                overlay.style.cssText = 'position:fixed;inset:0;z-index:100001;background:rgba(0,0,0,.6);display:flex;' +
+                    'align-items:center;justify-content:center;';
+                var title = items.length === 1 ? 'Delete folder?' : 'Delete ' + items.length + ' folders?';
+                var shown = names.slice(0, 10);
+                var more = names.length - shown.length;
+                overlay.innerHTML =
+                    '<div role="dialog" aria-modal="true" style="background:#2b2b2b;color:#fff;border-radius:.4em;padding:1.4em 1.6em;' +
+                    'max-width:32em;width:calc(100% - 3em);box-shadow:0 8px 32px rgba(0,0,0,.6);">' +
+                    '<h2 style="margin:0 0 .6em;font-size:1.3em;"></h2>' +
+                    '<p style="margin:0 0 .4em;opacity:.85;">These folders and everything in them will be removed from disk:</p>' +
+                    '<ul class="foldersorter-confirm-names" style="margin:0 0 1em;padding-left:1.4em;max-height:14em;overflow:auto;"></ul>' +
+                    '<label style="display:flex;align-items:center;gap:.5em;margin-bottom:1.2em;cursor:pointer;">' +
+                    '<input type="checkbox" class="foldersorter-confirm-skip"> Don\u2019t ask again in this browser tab</label>' +
+                    '<div style="display:flex;justify-content:flex-end;gap:.6em;">' +
+                    '<button type="button" class="raised button-cancel emby-button foldersorter-confirm-cancel">Cancel</button>' +
+                    '<button type="button" class="raised button-delete emby-button foldersorter-confirm-ok" ' +
+                    'style="background:#c62828;color:#fff;">Delete</button></div></div>';
+                overlay.querySelector('h2').textContent = title;
+                var list = overlay.querySelector('.foldersorter-confirm-names');
+                shown.forEach(function (name) {
+                    var li = document.createElement('li');
+                    li.textContent = name;
+                    list.appendChild(li);
+                });
+                if (more > 0) {
+                    var li = document.createElement('li');
+                    li.textContent = 'and ' + more + ' more';
+                    li.style.opacity = '.7';
+                    list.appendChild(li);
+                }
+
+                var finish = function (ok) {
+                    document.removeEventListener('keydown', onKey, true);
+                    if (ok && overlay.querySelector('.foldersorter-confirm-skip').checked) {
+                        setConfirmationSkipped(true);
+                    }
+                    overlay.remove();
+                    resolve(ok);
+                };
+                var onKey = function (e) {
+                    if (e.key === 'Escape') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        finish(false);
+                    }
+                };
+                overlay.querySelector('.foldersorter-confirm-cancel').addEventListener('click', function () { finish(false); });
+                overlay.querySelector('.foldersorter-confirm-ok').addEventListener('click', function () { finish(true); });
+                overlay.addEventListener('mousedown', function (e) {
+                    if (e.target === overlay) {
+                        finish(false);
+                    }
+                });
+                document.addEventListener('keydown', onKey, true);
+                document.body.appendChild(overlay);
+                overlay.querySelector('.foldersorter-confirm-ok').focus();
+            });
+        });
+    }
+
+    function confirmationEntry(onClick) {
+        return makeButton('help_outline', 'Ask before deleting folders', function () {
+            setConfirmationSkipped(false);
+            toast('Delete confirmation is back on');
+            onClick();
         });
     }
 
     function runMove(sheet, item, destination) {
         closeSheet(sheet);
-        moveItem(item, destination);
+        moveItems([item], destination);
     }
 
     function runDelete(sheet, item) {
         closeSheet(sheet);
-        deleteItem(item);
+        deleteItems([item]);
     }
 
     // ---------- public API for other plugins ----------
 
     // A small popup with the same entries as the item menu, anchored to an element. Other plugins (Folder
-    // Browser) use it through window.FolderSorter and simply don't show their button when it is missing.
+    // Browser) use it through window.FolderSorter and simply don't show their buttons when it is missing.
     var openPopup = null;
 
     function detachPopup() {
@@ -370,15 +533,20 @@
         }
     }
 
-    function showMenu(anchor, itemId) {
+    function eligible(item) {
+        return !!item && (item.Type === 'Audio' || item.Type === 'MusicAlbum') && item.CanDelete === true;
+    }
+
+    function showMenu(anchor, itemIds) {
         closePopup(null);
+        var ids = Array.isArray(itemIds) ? itemIds : [itemIds];
         return Promise.all([
-            api().getItem(api().getCurrentUserId(), itemId),
+            Promise.all(ids.map(function (id) { return api().getItem(api().getCurrentUserId(), id); })),
             getDestinations()
         ]).then(function (r) {
-            var item = r[0];
+            var items = r[0].filter(eligible);
             var destinations = r[1] || [];
-            if (!item || (item.Type !== 'Audio' && item.Type !== 'MusicAlbum') || item.CanDelete !== true) {
+            if (!items.length) {
                 window.alert('Folder Sorter can only move or delete songs and albums you are allowed to delete.');
                 return null;
             }
@@ -389,18 +557,30 @@
                 el.style.cssText = 'position:fixed;z-index:100000;min-width:14em;padding:.4em 0;border-radius:.3em;' +
                     'background:#2b2b2b;color:#fff;box-shadow:0 4px 16px rgba(0,0,0,.6);';
 
+                if (ids.length > 1) {
+                    var header = document.createElement('div');
+                    header.style.cssText = 'padding:.4em 1em .5em;opacity:.7;font-size:.9em;';
+                    header.textContent = items.length === ids.length
+                        ? items.length + ' folders selected'
+                        : items.length + ' of ' + ids.length + ' selected folders can be sorted';
+                    el.appendChild(header);
+                }
+
                 var choose = function (action) {
                     detachPopup();
-                    action().then(function (ok) { resolve(ok ? 'done' : null); });
+                    action().then(resolve, function () { resolve(null); });
                 };
                 destinations.forEach(function (d) {
                     el.appendChild(makeButton('drive_file_move', 'Move to ' + d.Name, function () {
-                        choose(function () { return moveItem(item, d); });
+                        choose(function () { return moveItems(items, d); });
                     }));
                 });
-                el.appendChild(makeButton('folder_delete', 'Delete folder', function () {
-                    choose(function () { return deleteItem(item); });
+                el.appendChild(makeButton('folder_delete', items.length === 1 ? 'Delete folder' : 'Delete ' + items.length + ' folders', function () {
+                    choose(function () { return deleteItems(items); });
                 }));
+                if (confirmationSkipped()) {
+                    el.appendChild(confirmationEntry(function () { closePopup(null); }));
+                }
                 el.querySelectorAll('.foldersorter-item').forEach(function (b) {
                     b.setAttribute('role', 'menuitem');
                     b.style.width = '100%';
@@ -439,8 +619,9 @@
     }
 
     window.FolderSorter = {
-        version: 1,
-        // Resolves 'done' after a successful move or delete, null when dismissed, cancelled or failed.
+        version: 2,
+        // showMenu(anchorElement, itemId | itemIds[]) resolves { succeeded: [ids], failed: [ids] } after a move
+        // or delete ran, or null when the menu was dismissed or the delete was cancelled.
         showMenu: showMenu
     };
     document.dispatchEvent(new CustomEvent('foldersorter:ready'));
