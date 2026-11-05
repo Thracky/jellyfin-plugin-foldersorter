@@ -10,7 +10,9 @@ public class PatchRequest
 /// <summary>Injects the client script into index.html.</summary>
 public static class IndexHtmlPatcher
 {
-    private const string ScriptTag = "<script defer src=\"/FolderSorter/client.js\"></script>";
+    // Relative to <base url>/web/index.html, so it also works when the server has a Base URL set
+    // (for example behind a reverse proxy at /jellyfin).
+    private const string ScriptTag = "<script defer src=\"../FolderSorter/client.js\"></script>";
 
     /// <summary>Callback invoked by File Transformation.</summary>
     /// <param name="request">The request.</param>

@@ -48,9 +48,32 @@
                     '<div class="inputContainer" style="flex:1;min-width:10em;margin:0;"><input is="emby-input" type="text" class="txtName" label="Name" value="' + esc(dest.Name) + '" /></div>' +
                     '<div class="selectContainer" style="flex:1;min-width:10em;margin:0;"><select is="emby-select" class="selLibrary" label="Library">' + options + '</select></div>' +
                     '<div class="inputContainer" style="flex:2;min-width:16em;margin:0;"><input is="emby-input" type="text" class="txtPath" label="Folder path on server" value="' + esc(dest.Path) + '" /></div>' +
+                    '<button is="emby-button" type="button" class="raised btnBrowse"><span>Browse…</span></button>' +
                     '<button is="emby-button" type="button" class="raised btnRemove"><span>Remove</span></button>';
                 row.querySelector('.btnRemove').addEventListener('click', function () { row.remove(); });
+                row.querySelector('.btnBrowse').addEventListener('click', function () { browse(row); });
                 rows.appendChild(row);
+            }
+
+            // Jellyfin's own folder picker (the one used when adding library folders). It starts in the
+            // current path, or else in the selected library's first media folder.
+            function browse(row) {
+                var txtPath = row.querySelector('.txtPath');
+                var library = libraries.find(function (l) { return l.ItemId === row.querySelector('.selLibrary').value; });
+                var start = txtPath.value.trim() || (library && library.Locations && library.Locations[0]) || '';
+                var picker = new Dashboard.DirectoryBrowser();
+                picker.show({
+                    path: start,
+                    header: 'Select destination folder',
+                    includeFiles: false,
+                    validateWriteable: true,
+                    callback: function (path) {
+                        if (path) {
+                            txtPath.value = path;
+                        }
+                        picker.close();
+                    }
+                });
             }
 
             page.addEventListener('pageshow', function () {

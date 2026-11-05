@@ -166,7 +166,7 @@ Open **Dashboard → Folder Sorter** (in the sidebar). Each destination has:
 |---|---|
 | Name | Shown in the menu as "Move to *Name*". |
 | Library | The Jellyfin library the destination belongs to. |
-| Folder path on server | Absolute path of an **existing** folder. It can be the library's media path itself or any folder inside it. It is never created automatically. |
+| Folder path on server | Absolute path of an **existing** folder. It can be the library's media path itself or any folder inside it. It is never created automatically. **Browse…** opens Jellyfin's server folder picker, starting at the current path or, if that's empty, at the selected library's first media folder. |
 
 Example for a flat `Artist - Title` layout with one library per stage:
 
