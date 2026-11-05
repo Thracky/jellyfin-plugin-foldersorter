@@ -290,6 +290,28 @@ All endpoints except `client.js` need a logged-in user (an access token, not an 
 Destinations are edited through Jellyfin's standard plugin configuration endpoints
 (`/Plugins/b8e5d3a1-6c4f-4b27-9a0e-3f1d7c52e8a4/Configuration`).
 
+## JavaScript API for other plugins
+
+The injected script publishes `window.FolderSorter` so other web-client add-ons can offer the same actions
+without depending on this plugin. [Folder Browser](../jellyfin-plugin-folderbrowser) uses it for its
+**Move or delete folder** button on album rows.
+
+```js
+if (window.FolderSorter && typeof window.FolderSorter.showMenu === 'function') {
+    // Opens a popup with "Move to …" and "Delete folder" next to anchorElement.
+    const result = await window.FolderSorter.showMenu(anchorElement, itemId);
+    // 'done' after a successful move or delete; null when dismissed, cancelled or failed
+    // (failures are already shown to the user).
+}
+```
+
+- `window.FolderSorter.version` is `1`.
+- Once the API is available, the script dispatches a `foldersorter:ready` event on `document`. Listen for it
+  if your script may run first.
+- The popup applies the same rules as the item menu:
+  - only songs and albums the user may delete;
+  - the same confirmation, playback handling and error alerts.
+
 ## Project structure
 
 ```

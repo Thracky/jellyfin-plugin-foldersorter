@@ -295,6 +295,7 @@
         return Promise.resolve();
     }
 
+    // Resolves true when the request succeeded, false when it failed (the error is shown to the user).
     function perform(item, request, successMessage) {
         return computePlan(item).catch(function () {
             return { kind: 'none' };
@@ -305,13 +306,15 @@
                 });
             }).then(function () {
                 toast(successMessage);
+                return true;
             });
-        }).catch(reportError);
+        }).catch(function (err) {
+            return reportError(err).then(function () { return false; });
+        });
     }
 
-    function runMove(sheet, item, destination) {
-        closeSheet(sheet);
-        perform(item, function () {
+    function moveItem(item, destination) {
+        return perform(item, function () {
             return api().ajax({
                 type: 'POST',
                 url: api().getUrl('FolderSorter/Items/' + item.Id + '/Move', { destinationId: destination.Id })
@@ -319,15 +322,126 @@
         }, 'Moved to ' + destination.Name);
     }
 
-    function runDelete(sheet, item) {
-        closeSheet(sheet);
-        api().getJSON(api().getUrl('FolderSorter/Items/' + item.Id + '/Folder')).then(function (info) {
+    // Resolves true when the folder was deleted, false when cancelled or failed.
+    function deleteItem(item) {
+        return api().getJSON(api().getUrl('FolderSorter/Items/' + item.Id + '/Folder')).then(function (info) {
             if (!window.confirm('Delete folder "' + info.FolderName + '" and everything in it?')) {
-                return;
+                return false;
             }
             return perform(item, function () {
                 return api().ajax({ type: 'DELETE', url: api().getUrl('FolderSorter/Items/' + item.Id + '/Folder') });
             }, 'Folder deleted');
-        }).catch(reportError);
+        }, function (err) {
+            return reportError(err).then(function () { return false; });
+        });
     }
+
+    function runMove(sheet, item, destination) {
+        closeSheet(sheet);
+        moveItem(item, destination);
+    }
+
+    function runDelete(sheet, item) {
+        closeSheet(sheet);
+        deleteItem(item);
+    }
+
+    // ---------- public API for other plugins ----------
+
+    // A small popup with the same entries as the item menu, anchored to an element. Other plugins (Folder
+    // Browser) use it through window.FolderSorter and simply don't show their button when it is missing.
+    var openPopup = null;
+
+    function detachPopup() {
+        var popup = openPopup;
+        if (popup) {
+            openPopup = null;
+            popup.el.remove();
+            document.removeEventListener('mousedown', popup.onOutside, true);
+            document.removeEventListener('keydown', popup.onKey, true);
+        }
+        return popup;
+    }
+
+    function closePopup(result) {
+        var popup = detachPopup();
+        if (popup) {
+            popup.resolve(result);
+        }
+    }
+
+    function showMenu(anchor, itemId) {
+        closePopup(null);
+        return Promise.all([
+            api().getItem(api().getCurrentUserId(), itemId),
+            getDestinations()
+        ]).then(function (r) {
+            var item = r[0];
+            var destinations = r[1] || [];
+            if (!item || (item.Type !== 'Audio' && item.Type !== 'MusicAlbum') || item.CanDelete !== true) {
+                window.alert('Folder Sorter can only move or delete songs and albums you are allowed to delete.');
+                return null;
+            }
+            return new Promise(function (resolve) {
+                var el = document.createElement('div');
+                el.className = 'foldersorter-popup';
+                el.setAttribute('role', 'menu');
+                el.style.cssText = 'position:fixed;z-index:100000;min-width:14em;padding:.4em 0;border-radius:.3em;' +
+                    'background:#2b2b2b;color:#fff;box-shadow:0 4px 16px rgba(0,0,0,.6);';
+
+                var choose = function (action) {
+                    detachPopup();
+                    action().then(function (ok) { resolve(ok ? 'done' : null); });
+                };
+                destinations.forEach(function (d) {
+                    el.appendChild(makeButton('drive_file_move', 'Move to ' + d.Name, function () {
+                        choose(function () { return moveItem(item, d); });
+                    }));
+                });
+                el.appendChild(makeButton('folder_delete', 'Delete folder', function () {
+                    choose(function () { return deleteItem(item); });
+                }));
+                el.querySelectorAll('.foldersorter-item').forEach(function (b) {
+                    b.setAttribute('role', 'menuitem');
+                    b.style.width = '100%';
+                });
+
+                document.body.appendChild(el);
+                var rect = anchor.getBoundingClientRect();
+                var left = Math.min(rect.right - el.offsetWidth, window.innerWidth - el.offsetWidth - 8);
+                var top = rect.bottom + 4;
+                if (top + el.offsetHeight > window.innerHeight - 8) {
+                    top = Math.max(8, rect.top - el.offsetHeight - 4);
+                }
+                el.style.left = Math.max(8, left) + 'px';
+                el.style.top = top + 'px';
+
+                openPopup = {
+                    el: el,
+                    resolve: resolve,
+                    onOutside: function (e) {
+                        if (!el.contains(e.target)) {
+                            closePopup(null);
+                        }
+                    },
+                    onKey: function (e) {
+                        if (e.key === 'Escape') {
+                            closePopup(null);
+                        }
+                    }
+                };
+                document.addEventListener('mousedown', openPopup.onOutside, true);
+                document.addEventListener('keydown', openPopup.onKey, true);
+            });
+        }).catch(function (err) {
+            return reportError(err).then(function () { return null; });
+        });
+    }
+
+    window.FolderSorter = {
+        version: 1,
+        // Resolves 'done' after a successful move or delete, null when dismissed, cancelled or failed.
+        showMenu: showMenu
+    };
+    document.dispatchEvent(new CustomEvent('foldersorter:ready'));
 })();
